@@ -1,3 +1,4 @@
+import math
 from typing import Any
 
 
@@ -28,6 +29,18 @@ class VectorStore:
         if not isinstance(record_id, str) or not record_id.strip():
             raise ValueError("record_id must be a non-empty string")
 
+        self._validate_vector(vector)
+
+        if not isinstance(text, str):
+            raise ValueError("text must be a string")
+
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata must be a dictionary")
+
+    def _validate_vector(self, vector: list[float]) -> None:
+        """
+        Validate a vector against the store's dimensionality requirements.
+        """
         if not isinstance(vector, list):
             raise ValueError("vector must be a list")
 
@@ -40,11 +53,31 @@ class VectorStore:
             if not isinstance(value, (int, float)):
                 raise ValueError("vector values must be numeric")
 
-        if not isinstance(text, str):
-            raise ValueError("text must be a string")
+    def _normalize_vector(self, vector: list[float]) -> list[float]:
+        """
+        Convert vector values to floats.
+        """
+        return [float(v) for v in vector]
 
-        if not isinstance(metadata, dict):
-            raise ValueError("metadata must be a dictionary")
+    def _cosine_similarity(
+        self,
+        vector_a: list[float],
+        vector_b: list[float],
+    ) -> float:
+        """
+        Compute cosine similarity between two vectors.
+
+        cosine_similarity = dot(a, b) / (||a|| * ||b||)
+        """
+        dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
+
+        norm_a = math.sqrt(sum(a * a for a in vector_a))
+        norm_b = math.sqrt(sum(b * b for b in vector_b))
+
+        if norm_a == 0.0 or norm_b == 0.0:
+            return 0.0
+
+        return dot_product / (norm_a * norm_b)
 
     def upsert(
         self,
@@ -60,7 +93,7 @@ class VectorStore:
 
         self.records[record_id] = {
             "id": record_id,
-            "vector": [float(v) for v in vector],
+            "vector": self._normalize_vector(vector),
             "text": text,
             "metadata": dict(metadata),
         }
@@ -105,6 +138,38 @@ class VectorStore:
             for record_id, record in self.records.items()
         }
 
+    def search(self, query_vector: list[float], top_k: int = 5) -> list[dict[str, Any]]:
+        """
+        Perform exact nearest-neighbor search using cosine similarity.
+
+        Args:
+            query_vector: Query embedding vector.
+            top_k: Number of top matches to return.
+
+        Returns:
+            A list of top-k results sorted by descending similarity score.
+        """
+        self._validate_vector(query_vector)
+
+        if top_k <= 0:
+            raise ValueError("top_k must be a positive integer")
+
+        normalized_query = self._normalize_vector(query_vector)
+        scored_results = []
+
+        for record in self.records.values():
+            score = self._cosine_similarity(normalized_query, record["vector"])
+
+            scored_results.append({
+                "id": record["id"],
+                "score": score,
+                "text": record["text"],
+                "metadata": dict(record["metadata"]),
+            })
+
+        scored_results.sort(key=lambda item: item["score"], reverse=True)
+        return scored_results[:top_k]
+
 
 def main() -> None:
     store = VectorStore(dimension=4)
@@ -133,21 +198,28 @@ def main() -> None:
         },
     )
 
+    store.upsert(
+        record_id="doc_003_chunk_0",
+        vector=[0.10, -0.40, 0.95, 0.35],
+        text="Replication improves durability and availability in distributed systems.",
+        metadata={
+            "source": "ddia_notes",
+            "topic": "replication",
+            "chunk_index": 0,
+        },
+    )
+
     print("\nFetching one record...")
     print(store.get("doc_001_chunk_0"))
 
-    print("\nCurrent store contents...")
-    print(store.show_all())
+    print("\nRunning vector search...")
+    query_vector = [0.11, -0.41, 0.96, 0.30]
+    results = store.search(query_vector, top_k=2)
 
-    print("\nDeleting one record...")
-    deleted = store.delete("doc_002_chunk_0")
-    print("Deleted:", deleted)
-
-    print("\nFetching deleted record...")
-    print(store.get("doc_002_chunk_0"))
-
-    print("\nFinal store contents...")
-    print(store.show_all())
+    print("Query vector:", query_vector)
+    print("Top results:")
+    for result in results:
+        print(result)
 
 
 if __name__ == "__main__":
