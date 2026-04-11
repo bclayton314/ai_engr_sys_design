@@ -1,20 +1,30 @@
+import json
 import math
+from pathlib import Path
 from typing import Any
+import os
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+WAL_PATH = Path(SCRIPT_DIR) / "vector_store.wal"
 
 
 class VectorStore:
-    def __init__(self, dimension: int) -> None:
+    def __init__(self, dimension: int, wal_path: Path) -> None:
         """
-        Initialize an empty in-memory vector store.
+        Initialize an in-memory vector store with a write-ahead log.
 
         Args:
             dimension: Required dimensionality for all vectors in the store.
+            wal_path: Path to the write-ahead log file.
         """
         if dimension <= 0:
             raise ValueError("dimension must be a positive integer")
 
         self.dimension = dimension
         self.records: dict[str, dict[str, Any]] = {}
+        self.wal_path = wal_path
+
+        self.wal_path.touch(exist_ok=True)
 
     def _validate_record(
         self,
@@ -66,8 +76,6 @@ class VectorStore:
     ) -> float:
         """
         Compute cosine similarity between two vectors.
-
-        cosine_similarity = dot(a, b) / (||a|| * ||b||)
         """
         dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
 
@@ -86,10 +94,6 @@ class VectorStore:
     ) -> bool:
         """
         Return True if a record's metadata satisfies all requested filters.
-
-        Matching rule:
-        - every filter key must exist in metadata
-        - metadata[key] must equal filters[key]
         """
         if filters is None:
             return True
@@ -105,6 +109,13 @@ class VectorStore:
 
         return True
 
+    def _append_to_wal(self, record: dict[str, Any]) -> None:
+        """
+        Append one mutation record to the write-ahead log.
+        """
+        with self.wal_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+
     def upsert(
         self,
         record_id: str,
@@ -114,12 +125,24 @@ class VectorStore:
     ) -> None:
         """
         Insert a new record or overwrite an existing one.
+        Logs the mutation before applying it to memory.
         """
         self._validate_record(record_id, vector, text, metadata)
 
+        normalized_vector = self._normalize_vector(vector)
+
+        wal_record = {
+            "op": "UPSERT",
+            "id": record_id,
+            "vector": normalized_vector,
+            "text": text,
+            "metadata": dict(metadata),
+        }
+        self._append_to_wal(wal_record)
+
         self.records[record_id] = {
             "id": record_id,
-            "vector": self._normalize_vector(vector),
+            "vector": normalized_vector,
             "text": text,
             "metadata": dict(metadata),
         }
@@ -143,12 +166,20 @@ class VectorStore:
     def delete(self, record_id: str) -> bool:
         """
         Delete a record by ID.
+        Logs the deletion before applying it to memory.
         Returns True if the record existed and was deleted, else False.
         """
-        if record_id in self.records:
-            del self.records[record_id]
-            return True
-        return False
+        if record_id not in self.records:
+            return False
+
+        wal_record = {
+            "op": "DELETE",
+            "id": record_id,
+        }
+        self._append_to_wal(wal_record)
+
+        del self.records[record_id]
+        return True
 
     def show_all(self) -> dict[str, dict[str, Any]]:
         """
@@ -173,14 +204,6 @@ class VectorStore:
         """
         Perform exact nearest-neighbor search using cosine similarity,
         optionally applying metadata filters before scoring.
-
-        Args:
-            query_vector: Query embedding vector.
-            top_k: Number of top matches to return.
-            filters: Optional metadata equality filters.
-
-        Returns:
-            A list of top-k results sorted by descending similarity score.
         """
         self._validate_vector(query_vector)
 
@@ -208,7 +231,7 @@ class VectorStore:
 
 
 def main() -> None:
-    store = VectorStore(dimension=4)
+    store = VectorStore(dimension=4, wal_path=WAL_PATH)
 
     print("Upserting records...")
 
@@ -248,51 +271,20 @@ def main() -> None:
         },
     )
 
-    store.upsert(
-        record_id="doc_004_chunk_0",
-        vector=[0.11, -0.39, 0.94, 0.33],
-        text="Partitioning and replication are key distributed systems concepts.",
-        metadata={
-            "source": "ddia_notes",
-            "topic": "replication",
-            "chunk_index": 1,
-            "language": "en",
-        },
-    )
-
-    query_vector = [0.11, -0.41, 0.96, 0.30]
-
     print("\nSearch without filters:")
-    unfiltered_results = store.search(query_vector, top_k=3)
-    for result in unfiltered_results:
+    query_vector = [0.11, -0.41, 0.96, 0.30]
+    results = store.search(query_vector, top_k=2)
+    for result in results:
         print(result)
 
-    print("\nSearch filtered by topic='replication':")
-    filtered_results = store.search(
-        query_vector,
-        top_k=3,
-        filters={"topic": "replication"},
-    )
-    for result in filtered_results:
-        print(result)
+    print("\nDeleting one record...")
+    deleted = store.delete("doc_002_chunk_0")
+    print("Deleted:", deleted)
 
-    print("\nSearch filtered by source='ai_engineering_notes':")
-    filtered_results = store.search(
-        query_vector,
-        top_k=3,
-        filters={"source": "ai_engineering_notes"},
-    )
-    for result in filtered_results:
-        print(result)
+    print("\nCurrent records...")
+    print(store.show_all())
 
-    print("\nSearch filtered by topic='replication' and chunk_index=1:")
-    filtered_results = store.search(
-        query_vector,
-        top_k=3,
-        filters={"topic": "replication", "chunk_index": 1},
-    )
-    for result in filtered_results:
-        print(result)
+    print(f"\nWAL file written to: {WAL_PATH}")
 
 
 if __name__ == "__main__":
