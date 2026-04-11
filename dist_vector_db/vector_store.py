@@ -2,16 +2,15 @@ import json
 import math
 from pathlib import Path
 from typing import Any
-import os
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WAL_PATH = Path(SCRIPT_DIR) / "vector_store.wal"
+
+WAL_PATH = Path("vector_store.wal")
 
 
 class VectorStore:
     def __init__(self, dimension: int, wal_path: Path) -> None:
         """
-        Initialize an in-memory vector store with a write-ahead log.
+        Initialize an in-memory vector store with WAL-based recovery.
 
         Args:
             dimension: Required dimensionality for all vectors in the store.
@@ -25,6 +24,7 @@ class VectorStore:
         self.wal_path = wal_path
 
         self.wal_path.touch(exist_ok=True)
+        self.replay_wal()
 
     def _validate_record(
         self,
@@ -115,6 +115,59 @@ class VectorStore:
         """
         with self.wal_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
+
+    def replay_wal(self) -> None:
+        """
+        Rebuild in-memory state by replaying WAL operations in order.
+        """
+        with self.wal_path.open("r", encoding="utf-8") as f:
+            for line_number, line in enumerate(f, start=1):
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as e:
+                    raise ValueError(
+                        f"Invalid JSON in WAL at line {line_number}: {e}"
+                    ) from e
+
+                op = record.get("op")
+                record_id = record.get("id")
+
+                if not isinstance(record_id, str) or not record_id.strip():
+                    raise ValueError(
+                        f"Invalid or missing record id in WAL at line {line_number}: {record}"
+                    )
+
+                if op == "UPSERT":
+                    vector = record.get("vector")
+                    text = record.get("text")
+                    metadata = record.get("metadata")
+
+                    if vector is None or text is None or metadata is None:
+                        raise ValueError(
+                            f"Invalid UPSERT record in WAL at line {line_number}: {record}"
+                        )
+
+                    self._validate_record(record_id, vector, text, metadata)
+
+                    self.records[record_id] = {
+                        "id": record_id,
+                        "vector": self._normalize_vector(vector),
+                        "text": text,
+                        "metadata": dict(metadata),
+                    }
+
+                elif op == "DELETE":
+                    self.records.pop(record_id, None)
+
+                else:
+                    raise ValueError(
+                        f"Unknown WAL operation at line {line_number}: {record}"
+                    )
 
     def upsert(
         self,
@@ -233,7 +286,10 @@ class VectorStore:
 def main() -> None:
     store = VectorStore(dimension=4, wal_path=WAL_PATH)
 
-    print("Upserting records...")
+    print("Current recovered records at startup:")
+    print(store.show_all())
+
+    print("\nUpserting records...")
 
     store.upsert(
         record_id="doc_001_chunk_0",
@@ -285,6 +341,7 @@ def main() -> None:
     print(store.show_all())
 
     print(f"\nWAL file written to: {WAL_PATH}")
+    print("Restart the program to observe WAL-based recovery.")
 
 
 if __name__ == "__main__":
