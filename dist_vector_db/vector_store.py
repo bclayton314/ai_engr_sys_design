@@ -2,19 +2,23 @@ import json
 import math
 from pathlib import Path
 from typing import Any
+import os
 
 
-WAL_PATH = Path("vector_store.wal")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+WAL_PATH = Path(SCRIPT_DIR) / "vector_store.wal"
+SNAPSHOT_PATH = Path(SCRIPT_DIR) / "vector_store.snapshot.json"
 
 
 class VectorStore:
-    def __init__(self, dimension: int, wal_path: Path) -> None:
+    def __init__(self, dimension: int, wal_path: Path, snapshot_path: Path) -> None:
         """
-        Initialize an in-memory vector store with WAL-based recovery.
+        Initialize an in-memory vector store with snapshot + WAL recovery.
 
         Args:
             dimension: Required dimensionality for all vectors in the store.
             wal_path: Path to the write-ahead log file.
+            snapshot_path: Path to the snapshot file.
         """
         if dimension <= 0:
             raise ValueError("dimension must be a positive integer")
@@ -22,9 +26,10 @@ class VectorStore:
         self.dimension = dimension
         self.records: dict[str, dict[str, Any]] = {}
         self.wal_path = wal_path
+        self.snapshot_path = snapshot_path
 
         self.wal_path.touch(exist_ok=True)
-        self.replay_wal()
+        self.recover()
 
     def _validate_record(
         self,
@@ -33,9 +38,6 @@ class VectorStore:
         text: str,
         metadata: dict[str, Any],
     ) -> None:
-        """
-        Validate a record before inserting it into the store.
-        """
         if not isinstance(record_id, str) or not record_id.strip():
             raise ValueError("record_id must be a non-empty string")
 
@@ -48,9 +50,6 @@ class VectorStore:
             raise ValueError("metadata must be a dictionary")
 
     def _validate_vector(self, vector: list[float]) -> None:
-        """
-        Validate a vector against the store's dimensionality requirements.
-        """
         if not isinstance(vector, list):
             raise ValueError("vector must be a list")
 
@@ -64,9 +63,6 @@ class VectorStore:
                 raise ValueError("vector values must be numeric")
 
     def _normalize_vector(self, vector: list[float]) -> list[float]:
-        """
-        Convert vector values to floats.
-        """
         return [float(v) for v in vector]
 
     def _cosine_similarity(
@@ -74,9 +70,6 @@ class VectorStore:
         vector_a: list[float],
         vector_b: list[float],
     ) -> float:
-        """
-        Compute cosine similarity between two vectors.
-        """
         dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
 
         norm_a = math.sqrt(sum(a * a for a in vector_a))
@@ -92,9 +85,6 @@ class VectorStore:
         metadata: dict[str, Any],
         filters: dict[str, Any] | None,
     ) -> bool:
-        """
-        Return True if a record's metadata satisfies all requested filters.
-        """
         if filters is None:
             return True
 
@@ -110,20 +100,74 @@ class VectorStore:
         return True
 
     def _append_to_wal(self, record: dict[str, Any]) -> None:
-        """
-        Append one mutation record to the write-ahead log.
-        """
         with self.wal_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
 
-    def replay_wal(self) -> None:
+    def _count_wal_lines(self) -> int:
+        count = 0
+        with self.wal_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    count += 1
+        return count
+
+    def _load_snapshot(self) -> tuple[dict[str, dict[str, Any]], int]:
         """
-        Rebuild in-memory state by replaying WAL operations in order.
+        Load snapshot records and the last included WAL line.
+        Returns ({}, 0) if no snapshot exists.
+        """
+        if not self.snapshot_path.exists():
+            return {}, 0
+
+        raw_text = self.snapshot_path.read_text(encoding="utf-8").strip()
+        if not raw_text:
+            return {}, 0
+
+        try:
+            snapshot_data = json.loads(raw_text)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"Invalid JSON in snapshot file {self.snapshot_path}: {e}"
+            ) from e
+
+        if not isinstance(snapshot_data, dict):
+            raise ValueError(
+                f"Snapshot file must contain a JSON object: {self.snapshot_path}"
+            )
+
+        records = snapshot_data.get("records", {})
+        last_wal_line = snapshot_data.get("last_wal_line", 0)
+
+        if not isinstance(records, dict):
+            raise ValueError("Snapshot field 'records' must be a JSON object.")
+
+        if not isinstance(last_wal_line, int) or last_wal_line < 0:
+            raise ValueError(
+                "Snapshot field 'last_wal_line' must be a non-negative integer."
+            )
+
+        for record_id, record in records.items():
+            if not isinstance(record, dict):
+                raise ValueError(f"Snapshot record for '{record_id}' must be an object.")
+
+            vector = record.get("vector")
+            text = record.get("text")
+            metadata = record.get("metadata")
+
+            self._validate_record(record_id, vector, text, metadata)
+
+        return records, last_wal_line
+
+    def _replay_wal_from_line(self, start_line: int) -> None:
+        """
+        Replay WAL records starting after start_line.
         """
         with self.wal_path.open("r", encoding="utf-8") as f:
             for line_number, line in enumerate(f, start=1):
-                line = line.strip()
+                if line_number <= start_line:
+                    continue
 
+                line = line.strip()
                 if not line:
                     continue
 
@@ -169,6 +213,63 @@ class VectorStore:
                         f"Unknown WAL operation at line {line_number}: {record}"
                     )
 
+    def recover(self) -> None:
+        """
+        Recover using:
+        1. snapshot
+        2. WAL tail after snapshot
+        """
+        snapshot_records, last_wal_line = self._load_snapshot()
+
+        self.records = {}
+        for record_id, record in snapshot_records.items():
+            self.records[record_id] = {
+                "id": record["id"],
+                "vector": self._normalize_vector(record["vector"]),
+                "text": record["text"],
+                "metadata": dict(record["metadata"]),
+            }
+
+        self._replay_wal_from_line(last_wal_line)
+
+    def create_snapshot(self) -> None:
+        """
+        Save the current full vector state and the latest WAL line count.
+        """
+        snapshot_data = {
+            "records": self.show_all(),
+            "last_wal_line": self._count_wal_lines(),
+        }
+
+        with self.snapshot_path.open("w", encoding="utf-8") as f:
+            json.dump(snapshot_data, f, indent=2)
+
+    def load_snapshot_contents(self) -> dict[str, Any] | None:
+        """
+        Read the raw snapshot file for inspection.
+        Returns None if no snapshot exists yet.
+        """
+        if not self.snapshot_path.exists():
+            return None
+
+        raw_text = self.snapshot_path.read_text(encoding="utf-8").strip()
+        if not raw_text:
+            return None
+
+        try:
+            snapshot_data = json.loads(raw_text)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"Invalid JSON in snapshot file {self.snapshot_path}: {e}"
+            ) from e
+
+        if not isinstance(snapshot_data, dict):
+            raise ValueError(
+                f"Snapshot file must contain a JSON object: {self.snapshot_path}"
+            )
+
+        return snapshot_data
+
     def upsert(
         self,
         record_id: str,
@@ -201,10 +302,6 @@ class VectorStore:
         }
 
     def get(self, record_id: str) -> dict[str, Any] | None:
-        """
-        Fetch a record by ID.
-        Returns None if not found.
-        """
         record = self.records.get(record_id)
         if record is None:
             return None
@@ -220,7 +317,6 @@ class VectorStore:
         """
         Delete a record by ID.
         Logs the deletion before applying it to memory.
-        Returns True if the record existed and was deleted, else False.
         """
         if record_id not in self.records:
             return False
@@ -235,9 +331,6 @@ class VectorStore:
         return True
 
     def show_all(self) -> dict[str, dict[str, Any]]:
-        """
-        Return a copy of all stored records.
-        """
         return {
             record_id: {
                 "id": record["id"],
@@ -254,10 +347,6 @@ class VectorStore:
         top_k: int = 5,
         filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """
-        Perform exact nearest-neighbor search using cosine similarity,
-        optionally applying metadata filters before scoring.
-        """
         self._validate_vector(query_vector)
 
         if top_k <= 0:
@@ -284,7 +373,11 @@ class VectorStore:
 
 
 def main() -> None:
-    store = VectorStore(dimension=4, wal_path=WAL_PATH)
+    store = VectorStore(
+        dimension=4,
+        wal_path=WAL_PATH,
+        snapshot_path=SNAPSHOT_PATH,
+    )
 
     print("Current recovered records at startup:")
     print(store.show_all())
@@ -327,21 +420,36 @@ def main() -> None:
         },
     )
 
-    print("\nSearch without filters:")
+    print("\nCreating snapshot...")
+    store.create_snapshot()
+    print(f"Snapshot written to: {SNAPSHOT_PATH}")
+
+    print("\nUpserting one more record after snapshot...")
+    store.upsert(
+        record_id="doc_004_chunk_0",
+        vector=[0.11, -0.39, 0.94, 0.33],
+        text="Partitioning and replication are key distributed systems concepts.",
+        metadata={
+            "source": "ddia_notes",
+            "topic": "replication",
+            "chunk_index": 1,
+            "language": "en",
+        },
+    )
+
+    print("\nSearch filtered by topic='replication':")
     query_vector = [0.11, -0.41, 0.96, 0.30]
-    results = store.search(query_vector, top_k=2)
+    results = store.search(query_vector, top_k=3, filters={"topic": "replication"})
     for result in results:
         print(result)
-
-    print("\nDeleting one record...")
-    deleted = store.delete("doc_002_chunk_0")
-    print("Deleted:", deleted)
 
     print("\nCurrent records...")
     print(store.show_all())
 
-    print(f"\nWAL file written to: {WAL_PATH}")
-    print("Restart the program to observe WAL-based recovery.")
+    print("\nSnapshot contents:")
+    print(store.load_snapshot_contents())
+
+    print("\nRestart the program to observe snapshot + WAL-tail recovery.")
 
 
 if __name__ == "__main__":
