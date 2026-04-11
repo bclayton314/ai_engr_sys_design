@@ -79,6 +79,32 @@ class VectorStore:
 
         return dot_product / (norm_a * norm_b)
 
+    def _metadata_matches(
+        self,
+        metadata: dict[str, Any],
+        filters: dict[str, Any] | None,
+    ) -> bool:
+        """
+        Return True if a record's metadata satisfies all requested filters.
+
+        Matching rule:
+        - every filter key must exist in metadata
+        - metadata[key] must equal filters[key]
+        """
+        if filters is None:
+            return True
+
+        if not isinstance(filters, dict):
+            raise ValueError("filters must be a dictionary or None")
+
+        for key, expected_value in filters.items():
+            if key not in metadata:
+                return False
+            if metadata[key] != expected_value:
+                return False
+
+        return True
+
     def upsert(
         self,
         record_id: str,
@@ -138,13 +164,20 @@ class VectorStore:
             for record_id, record in self.records.items()
         }
 
-    def search(self, query_vector: list[float], top_k: int = 5) -> list[dict[str, Any]]:
+    def search(
+        self,
+        query_vector: list[float],
+        top_k: int = 5,
+        filters: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         """
-        Perform exact nearest-neighbor search using cosine similarity.
+        Perform exact nearest-neighbor search using cosine similarity,
+        optionally applying metadata filters before scoring.
 
         Args:
             query_vector: Query embedding vector.
             top_k: Number of top matches to return.
+            filters: Optional metadata equality filters.
 
         Returns:
             A list of top-k results sorted by descending similarity score.
@@ -158,6 +191,9 @@ class VectorStore:
         scored_results = []
 
         for record in self.records.values():
+            if not self._metadata_matches(record["metadata"], filters):
+                continue
+
             score = self._cosine_similarity(normalized_query, record["vector"])
 
             scored_results.append({
@@ -184,6 +220,7 @@ def main() -> None:
             "source": "ddia_notes",
             "topic": "distributed-systems",
             "chunk_index": 0,
+            "language": "en",
         },
     )
 
@@ -195,6 +232,7 @@ def main() -> None:
             "source": "ai_engineering_notes",
             "topic": "vector-db",
             "chunk_index": 0,
+            "language": "en",
         },
     )
 
@@ -206,19 +244,54 @@ def main() -> None:
             "source": "ddia_notes",
             "topic": "replication",
             "chunk_index": 0,
+            "language": "en",
         },
     )
 
-    print("\nFetching one record...")
-    print(store.get("doc_001_chunk_0"))
+    store.upsert(
+        record_id="doc_004_chunk_0",
+        vector=[0.11, -0.39, 0.94, 0.33],
+        text="Partitioning and replication are key distributed systems concepts.",
+        metadata={
+            "source": "ddia_notes",
+            "topic": "replication",
+            "chunk_index": 1,
+            "language": "en",
+        },
+    )
 
-    print("\nRunning vector search...")
     query_vector = [0.11, -0.41, 0.96, 0.30]
-    results = store.search(query_vector, top_k=2)
 
-    print("Query vector:", query_vector)
-    print("Top results:")
-    for result in results:
+    print("\nSearch without filters:")
+    unfiltered_results = store.search(query_vector, top_k=3)
+    for result in unfiltered_results:
+        print(result)
+
+    print("\nSearch filtered by topic='replication':")
+    filtered_results = store.search(
+        query_vector,
+        top_k=3,
+        filters={"topic": "replication"},
+    )
+    for result in filtered_results:
+        print(result)
+
+    print("\nSearch filtered by source='ai_engineering_notes':")
+    filtered_results = store.search(
+        query_vector,
+        top_k=3,
+        filters={"source": "ai_engineering_notes"},
+    )
+    for result in filtered_results:
+        print(result)
+
+    print("\nSearch filtered by topic='replication' and chunk_index=1:")
+    filtered_results = store.search(
+        query_vector,
+        top_k=3,
+        filters={"topic": "replication", "chunk_index": 1},
+    )
+    for result in filtered_results:
         print(result)
 
 
