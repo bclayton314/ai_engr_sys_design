@@ -47,7 +47,23 @@
         "chunk_index": 0,
         "language": "en"
       }
+    },
+    "doc_004_chunk_0": {
+      "id": "doc_004_chunk_0",
+      "vector": [
+        0.11,
+        -0.39,
+        0.94,
+        0.33
+      ],
+      "text": "Partitioning and replication are key distributed systems concepts.",
+      "metadata": {
+        "source": "ddia_notes",
+        "topic": "replication",
+        "chunk_index": 1,
+        "language": "en"
+      }
     }
   },
-  "last_wal_line": 11
+  "last_wal_line": 15
 }
