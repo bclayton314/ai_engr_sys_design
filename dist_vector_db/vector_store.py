@@ -1,5 +1,6 @@
 import json
 import math
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -13,18 +14,47 @@ SNAPSHOT_PATH = Path(SCRIPT_DIR) / "vector_store.snapshot.json"
 
 HOST = "127.0.0.1"
 PORT = 8080
+VECTOR_DIMENSION = 8
+
+
+class MockEmbedder:
+    """
+    A simple deterministic text embedder for learning purposes.
+
+    This is NOT a real semantic embedding model.
+    It turns text into a fixed-size numeric vector by hashing tokens into buckets.
+    """
+
+    def __init__(self, dimension: int) -> None:
+        if dimension <= 0:
+            raise ValueError("dimension must be a positive integer")
+        self.dimension = dimension
+
+    def embed(self, text: str) -> list[float]:
+        if not isinstance(text, str):
+            raise ValueError("text must be a string")
+
+        tokens = text.lower().split()
+        vector = [0.0] * self.dimension
+
+        if not tokens:
+            return vector
+
+        token_counts = Counter(tokens)
+
+        for token, count in token_counts.items():
+            bucket = sum(ord(ch) for ch in token) % self.dimension
+            vector[bucket] += float(count)
+
+        norm = math.sqrt(sum(v * v for v in vector))
+        if norm == 0.0:
+            return vector
+
+        return [v / norm for v in vector]
 
 
 class VectorStore:
     def __init__(self, dimension: int, wal_path: Path, snapshot_path: Path) -> None:
-        """
-        Initialize an in-memory vector store with snapshot + WAL recovery.
-
-        Args:
-            dimension: Required dimensionality for all vectors in the store.
-            wal_path: Path to the write-ahead log file.
-            snapshot_path: Path to the snapshot file.
-        """
         if dimension <= 0:
             raise ValueError("dimension must be a positive integer")
 
@@ -350,8 +380,9 @@ class VectorStore:
         return scored_results[:top_k]
 
 
+embedder = MockEmbedder(dimension=VECTOR_DIMENSION)
 vector_store = VectorStore(
-    dimension=4,
+    dimension=VECTOR_DIMENSION,
     wal_path=WAL_PATH,
     snapshot_path=SNAPSHOT_PATH,
 )
@@ -452,6 +483,46 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "message": "record upserted",
                 "id": record_id,
+                "mode": "vector_upsert",
+            })
+            return
+
+        if parsed.path == "/documents/upsert":
+            try:
+                body = self._read_json_body()
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
+
+            record_id = body.get("id")
+            text = body.get("text")
+            metadata = body.get("metadata", {})
+
+            if record_id is None or text is None:
+                self._send_json(400, {"error": "Missing required fields: 'id' and 'text'"})
+                return
+
+            if not isinstance(text, str):
+                self._send_json(400, {"error": "'text' must be a string"})
+                return
+
+            try:
+                vector = embedder.embed(text)
+                vector_store.upsert(
+                    record_id=record_id,
+                    vector=vector,
+                    text=text,
+                    metadata=metadata,
+                )
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
+
+            self._send_json(200, {
+                "message": "document embedded and upserted",
+                "id": record_id,
+                "vector_dimension": len(vector),
+                "mode": "document_upsert",
             })
             return
 
@@ -484,6 +555,46 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
                 "results": results,
                 "top_k": top_k,
                 "filters": filters,
+                "mode": "vector_search",
+            })
+            return
+
+        if parsed.path == "/documents/search":
+            try:
+                body = self._read_json_body()
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
+
+            query_text = body.get("query_text")
+            top_k = body.get("top_k", 5)
+            filters = body.get("filters")
+
+            if query_text is None:
+                self._send_json(400, {"error": "Missing required field: 'query_text'"})
+                return
+
+            if not isinstance(query_text, str):
+                self._send_json(400, {"error": "'query_text' must be a string"})
+                return
+
+            try:
+                query_vector = embedder.embed(query_text)
+                results = vector_store.search(
+                    query_vector=query_vector,
+                    top_k=top_k,
+                    filters=filters,
+                )
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
+
+            self._send_json(200, {
+                "query_text": query_text,
+                "results": results,
+                "top_k": top_k,
+                "filters": filters,
+                "mode": "document_search",
             })
             return
 
@@ -516,12 +627,15 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
 def run_server() -> None:
     server = HTTPServer((HOST, PORT), VectorStoreRequestHandler)
     print(f"Vector store HTTP server running at http://{HOST}:{PORT}")
+    print(f"Embedding mode: mock embedder (dimension={VECTOR_DIMENSION})")
     print("Routes:")
     print("  GET    /vectors")
     print("  GET    /vectors/<id>")
     print("  DELETE /vectors/<id>")
     print("  POST   /vectors/upsert")
+    print("  POST   /documents/upsert")
     print("  POST   /search")
+    print("  POST   /documents/search")
     print("  POST   /snapshot")
     print("  GET    /snapshot")
     server.serve_forever()
