@@ -1,13 +1,18 @@
 import json
 import math
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 import os
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WAL_PATH = Path(SCRIPT_DIR) / "vector_store.wal"
 SNAPSHOT_PATH = Path(SCRIPT_DIR) / "vector_store.snapshot.json"
+
+HOST = "127.0.0.1"
+PORT = 8080
 
 
 class VectorStore:
@@ -112,10 +117,6 @@ class VectorStore:
         return count
 
     def _load_snapshot(self) -> tuple[dict[str, dict[str, Any]], int]:
-        """
-        Load snapshot records and the last included WAL line.
-        Returns ({}, 0) if no snapshot exists.
-        """
         if not self.snapshot_path.exists():
             return {}, 0
 
@@ -159,9 +160,6 @@ class VectorStore:
         return records, last_wal_line
 
     def _replay_wal_from_line(self, start_line: int) -> None:
-        """
-        Replay WAL records starting after start_line.
-        """
         with self.wal_path.open("r", encoding="utf-8") as f:
             for line_number, line in enumerate(f, start=1):
                 if line_number <= start_line:
@@ -214,11 +212,6 @@ class VectorStore:
                     )
 
     def recover(self) -> None:
-        """
-        Recover using:
-        1. snapshot
-        2. WAL tail after snapshot
-        """
         snapshot_records, last_wal_line = self._load_snapshot()
 
         self.records = {}
@@ -233,9 +226,6 @@ class VectorStore:
         self._replay_wal_from_line(last_wal_line)
 
     def create_snapshot(self) -> None:
-        """
-        Save the current full vector state and the latest WAL line count.
-        """
         snapshot_data = {
             "records": self.show_all(),
             "last_wal_line": self._count_wal_lines(),
@@ -245,10 +235,6 @@ class VectorStore:
             json.dump(snapshot_data, f, indent=2)
 
     def load_snapshot_contents(self) -> dict[str, Any] | None:
-        """
-        Read the raw snapshot file for inspection.
-        Returns None if no snapshot exists yet.
-        """
         if not self.snapshot_path.exists():
             return None
 
@@ -277,10 +263,6 @@ class VectorStore:
         text: str,
         metadata: dict[str, Any],
     ) -> None:
-        """
-        Insert a new record or overwrite an existing one.
-        Logs the mutation before applying it to memory.
-        """
         self._validate_record(record_id, vector, text, metadata)
 
         normalized_vector = self._normalize_vector(vector)
@@ -314,10 +296,6 @@ class VectorStore:
         }
 
     def delete(self, record_id: str) -> bool:
-        """
-        Delete a record by ID.
-        Logs the deletion before applying it to memory.
-        """
         if record_id not in self.records:
             return False
 
@@ -372,85 +350,182 @@ class VectorStore:
         return scored_results[:top_k]
 
 
-def main() -> None:
-    store = VectorStore(
-        dimension=4,
-        wal_path=WAL_PATH,
-        snapshot_path=SNAPSHOT_PATH,
-    )
+vector_store = VectorStore(
+    dimension=4,
+    wal_path=WAL_PATH,
+    snapshot_path=SNAPSHOT_PATH,
+)
 
-    print("Current recovered records at startup:")
-    print(store.show_all())
 
-    print("\nUpserting records...")
+class VectorStoreRequestHandler(BaseHTTPRequestHandler):
+    def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
+        response_body = json.dumps(payload).encode("utf-8")
 
-    store.upsert(
-        record_id="doc_001_chunk_0",
-        vector=[0.12, -0.44, 0.98, 0.31],
-        text="Distributed systems are collections of independent computers.",
-        metadata={
-            "source": "ddia_notes",
-            "topic": "distributed-systems",
-            "chunk_index": 0,
-            "language": "en",
-        },
-    )
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response_body)))
+        self.end_headers()
+        self.wfile.write(response_body)
 
-    store.upsert(
-        record_id="doc_002_chunk_0",
-        vector=[0.55, 0.10, -0.25, 0.77],
-        text="Vector databases are optimized for similarity search.",
-        metadata={
-            "source": "ai_engineering_notes",
-            "topic": "vector-db",
-            "chunk_index": 0,
-            "language": "en",
-        },
-    )
+    def _read_json_body(self) -> dict[str, Any]:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(content_length).decode("utf-8")
 
-    store.upsert(
-        record_id="doc_003_chunk_0",
-        vector=[0.10, -0.40, 0.95, 0.35],
-        text="Replication improves durability and availability in distributed systems.",
-        metadata={
-            "source": "ddia_notes",
-            "topic": "replication",
-            "chunk_index": 0,
-            "language": "en",
-        },
-    )
+        if not body:
+            return {}
 
-    print("\nCreating snapshot...")
-    store.create_snapshot()
-    print(f"Snapshot written to: {SNAPSHOT_PATH}")
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON body: {e}") from e
 
-    print("\nUpserting one more record after snapshot...")
-    store.upsert(
-        record_id="doc_004_chunk_0",
-        vector=[0.11, -0.39, 0.94, 0.33],
-        text="Partitioning and replication are key distributed systems concepts.",
-        metadata={
-            "source": "ddia_notes",
-            "topic": "replication",
-            "chunk_index": 1,
-            "language": "en",
-        },
-    )
+        if not isinstance(data, dict):
+            raise ValueError("JSON body must be an object.")
 
-    print("\nSearch filtered by topic='replication':")
-    query_vector = [0.11, -0.41, 0.96, 0.30]
-    results = store.search(query_vector, top_k=3, filters={"topic": "replication"})
-    for result in results:
-        print(result)
+        return data
 
-    print("\nCurrent records...")
-    print(store.show_all())
+    def _extract_record_id_from_path(self) -> str | None:
+        parsed = urlparse(self.path)
+        path_parts = parsed.path.strip("/").split("/")
 
-    print("\nSnapshot contents:")
-    print(store.load_snapshot_contents())
+        if len(path_parts) == 2 and path_parts[0] == "vectors":
+            return path_parts[1]
 
-    print("\nRestart the program to observe snapshot + WAL-tail recovery.")
+        return None
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/vectors":
+            self._send_json(200, {"records": vector_store.show_all()})
+            return
+
+        if parsed.path == "/snapshot":
+            snapshot = vector_store.load_snapshot_contents()
+            if snapshot is None:
+                self._send_json(404, {"error": "No snapshot found"})
+            else:
+                self._send_json(200, {"snapshot": snapshot})
+            return
+
+        record_id = self._extract_record_id_from_path()
+        if record_id is not None:
+            record = vector_store.get(record_id)
+            if record is None:
+                self._send_json(404, {"error": f"Record '{record_id}' not found"})
+            else:
+                self._send_json(200, {"record": record})
+            return
+
+        self._send_json(404, {"error": "Route not found"})
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/vectors/upsert":
+            try:
+                body = self._read_json_body()
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
+
+            record_id = body.get("id")
+            vector = body.get("vector")
+            text = body.get("text", "")
+            metadata = body.get("metadata", {})
+
+            if record_id is None or vector is None:
+                self._send_json(400, {"error": "Missing required fields: 'id' and 'vector'"})
+                return
+
+            try:
+                vector_store.upsert(
+                    record_id=record_id,
+                    vector=vector,
+                    text=text,
+                    metadata=metadata,
+                )
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
+
+            self._send_json(200, {
+                "message": "record upserted",
+                "id": record_id,
+            })
+            return
+
+        if parsed.path == "/search":
+            try:
+                body = self._read_json_body()
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
+
+            query_vector = body.get("query_vector")
+            top_k = body.get("top_k", 5)
+            filters = body.get("filters")
+
+            if query_vector is None:
+                self._send_json(400, {"error": "Missing required field: 'query_vector'"})
+                return
+
+            try:
+                results = vector_store.search(
+                    query_vector=query_vector,
+                    top_k=top_k,
+                    filters=filters,
+                )
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
+
+            self._send_json(200, {
+                "results": results,
+                "top_k": top_k,
+                "filters": filters,
+            })
+            return
+
+        if parsed.path == "/snapshot":
+            vector_store.create_snapshot()
+            self._send_json(200, {"message": "snapshot created"})
+            return
+
+        self._send_json(404, {"error": "Route not found"})
+
+    def do_DELETE(self) -> None:
+        record_id = self._extract_record_id_from_path()
+        if record_id is None:
+            self._send_json(404, {"error": "Route not found"})
+            return
+
+        deleted = vector_store.delete(record_id)
+        if deleted:
+            self._send_json(200, {
+                "message": "record deleted",
+                "id": record_id,
+            })
+        else:
+            self._send_json(404, {"error": f"Record '{record_id}' not found"})
+
+    def log_message(self, format: str, *args) -> None:
+        print(f"{self.command} {self.path} - {format % args}")
+
+
+def run_server() -> None:
+    server = HTTPServer((HOST, PORT), VectorStoreRequestHandler)
+    print(f"Vector store HTTP server running at http://{HOST}:{PORT}")
+    print("Routes:")
+    print("  GET    /vectors")
+    print("  GET    /vectors/<id>")
+    print("  DELETE /vectors/<id>")
+    print("  POST   /vectors/upsert")
+    print("  POST   /search")
+    print("  POST   /snapshot")
+    print("  GET    /snapshot")
+    server.serve_forever()
 
 
 if __name__ == "__main__":
-    main()
+    run_server()
