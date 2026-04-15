@@ -5,10 +5,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+import os
 
-
-WAL_PATH = Path("vector_store.wal")
-SNAPSHOT_PATH = Path("vector_store.snapshot.json")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+WAL_PATH = Path(SCRIPT_DIR) / "vector_store.wal"
+SNAPSHOT_PATH = Path(SCRIPT_DIR) / "vector_store.snapshot.json"
 
 HOST = "127.0.0.1"
 PORT = 8080
