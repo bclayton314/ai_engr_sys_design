@@ -5,12 +5,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
-import os
 
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WAL_PATH = Path(SCRIPT_DIR) / "vector_store.wal"
-SNAPSHOT_PATH = Path(SCRIPT_DIR) / "vector_store.snapshot.json"
+WAL_PATH = Path("vector_store.wal")
+SNAPSHOT_PATH = Path("vector_store.snapshot.json")
 
 HOST = "127.0.0.1"
 PORT = 8080
@@ -51,6 +49,52 @@ class MockEmbedder:
             return vector
 
         return [v / norm for v in vector]
+
+
+class SimpleChunker:
+    """
+    Splits text into overlapping word-based chunks.
+    """
+
+    def chunk_text(
+        self,
+        text: str,
+        chunk_size: int = 12,
+        chunk_overlap: int = 3,
+    ) -> list[str]:
+        if not isinstance(text, str):
+            raise ValueError("text must be a string")
+
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be a positive integer")
+
+        if chunk_overlap < 0:
+            raise ValueError("chunk_overlap must be non-negative")
+
+        if chunk_overlap >= chunk_size:
+            raise ValueError("chunk_overlap must be smaller than chunk_size")
+
+        words = text.split()
+        if not words:
+            return []
+
+        chunks = []
+        step = chunk_size - chunk_overlap
+
+        for start in range(0, len(words), step):
+            end = start + chunk_size
+            chunk_words = words[start:end]
+
+            if not chunk_words:
+                continue
+
+            chunk_text = " ".join(chunk_words)
+            chunks.append(chunk_text)
+
+            if end >= len(words):
+                break
+
+        return chunks
 
 
 class VectorStore:
@@ -381,6 +425,7 @@ class VectorStore:
 
 
 embedder = MockEmbedder(dimension=VECTOR_DIMENSION)
+chunker = SimpleChunker()
 vector_store = VectorStore(
     dimension=VECTOR_DIMENSION,
     wal_path=WAL_PATH,
@@ -526,6 +571,71 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if parsed.path == "/documents/upsert_chunked":
+            try:
+                body = self._read_json_body()
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
+
+            document_id = body.get("id")
+            text = body.get("text")
+            metadata = body.get("metadata", {})
+            chunk_size = body.get("chunk_size", 12)
+            chunk_overlap = body.get("chunk_overlap", 3)
+
+            if document_id is None or text is None:
+                self._send_json(400, {"error": "Missing required fields: 'id' and 'text'"})
+                return
+
+            if not isinstance(text, str):
+                self._send_json(400, {"error": "'text' must be a string"})
+                return
+
+            try:
+                chunks = chunker.chunk_text(
+                    text=text,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                )
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
+
+            created_ids = []
+
+            try:
+                for chunk_index, chunk_text in enumerate(chunks):
+                    chunk_id = f"{document_id}_chunk_{chunk_index}"
+                    chunk_metadata = dict(metadata)
+                    chunk_metadata["document_id"] = document_id
+                    chunk_metadata["chunk_index"] = chunk_index
+                    chunk_metadata["chunk_count"] = len(chunks)
+
+                    vector = embedder.embed(chunk_text)
+                    vector_store.upsert(
+                        record_id=chunk_id,
+                        vector=vector,
+                        text=chunk_text,
+                        metadata=chunk_metadata,
+                    )
+                    created_ids.append(chunk_id)
+
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
+
+            self._send_json(200, {
+                "message": "document chunked, embedded, and upserted",
+                "document_id": document_id,
+                "chunk_count": len(chunks),
+                "chunk_ids": created_ids,
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+                "mode": "document_chunked_upsert",
+            })
+            return
+
         if parsed.path == "/search":
             try:
                 body = self._read_json_body()
@@ -634,6 +744,7 @@ def run_server() -> None:
     print("  DELETE /vectors/<id>")
     print("  POST   /vectors/upsert")
     print("  POST   /documents/upsert")
+    print("  POST   /documents/upsert_chunked")
     print("  POST   /search")
     print("  POST   /documents/search")
     print("  POST   /snapshot")
