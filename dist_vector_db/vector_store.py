@@ -107,7 +107,7 @@ class VectorStore:
         self.wal_path = wal_path
         self.snapshot_path = snapshot_path
 
-        # Stage 10 ANN-style candidate index:
+        # Approximate candidate-generation index:
         # bucket_id -> set(record_id)
         self.bucket_index: dict[int, set[str]] = {}
         self.num_index_buckets = min(4, self.dimension)
@@ -187,9 +187,9 @@ class VectorStore:
         """
         Return indices of the top-N dimensions by absolute value.
 
-        This is a very simple approximate indexing idea:
-        vectors with similar strong dimensions are likely to become candidates
-        for one another.
+        This is a simple approximate indexing idea:
+        vectors with similar strong dimensions are likely to become
+        candidates for one another.
         """
         indexed = list(enumerate(vector))
         indexed.sort(key=lambda item: abs(item[1]), reverse=True)
@@ -470,7 +470,7 @@ class VectorStore:
 
         normalized_query = self._normalize_vector(query_vector)
 
-        # Stage 10 approximate candidate generation:
+        # Approximate candidate generation
         query_buckets = self._get_dominant_buckets(normalized_query)
 
         candidate_ids = set()
@@ -478,7 +478,7 @@ class VectorStore:
             if bucket in self.bucket_index:
                 candidate_ids.update(self.bucket_index[bucket])
 
-        # Fallback if the approximate index gives no candidates.
+        # Fallback if the index yields no candidates
         if not candidate_ids:
             candidate_ids = set(self.records.keys())
 
@@ -501,6 +501,54 @@ class VectorStore:
 
         scored_results.sort(key=lambda item: item["score"], reverse=True)
         return scored_results[:top_k]
+
+
+def build_rag_context(results: list[dict[str, Any]]) -> str:
+    """
+    Convert ranked retrieval results into a single context block
+    suitable for an LLM prompt.
+    """
+    parts = []
+
+    for idx, result in enumerate(results, start=1):
+        parts.append(
+            f"Chunk {idx} (id={result['id']}, score={result['score']:.4f}):\n"
+            f"{result['text']}"
+        )
+
+    return "\n\n".join(parts)
+
+
+def rag_retrieve(
+    query_text: str,
+    top_k: int,
+    filters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(query_text, str):
+        raise ValueError("query_text must be a string")
+
+    if top_k <= 0:
+        raise ValueError("top_k must be a positive integer")
+
+    query_vector = embedder.embed(query_text)
+    results = vector_store.search(
+        query_vector=query_vector,
+        top_k=top_k,
+        filters=filters,
+    )
+
+    context = build_rag_context(results)
+
+    return {
+        "query_text": query_text,
+        "top_k": top_k,
+        "matches": results,
+        "context": context,
+        "debug": {
+            "filters": filters,
+            "result_count": len(results),
+        },
+    }
 
 
 embedder = MockEmbedder(dimension=VECTOR_DIMENSION)
@@ -821,6 +869,42 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/rag/retrieve":
+            try:
+                body = self._read_json_body()
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
+
+            query_text = body.get("query_text")
+            top_k = body.get("top_k", 5)
+            filters = body.get("filters")
+
+            if query_text is None:
+                self._send_json(400, {"error": "Missing required field: 'query_text'"})
+                return
+
+            if not isinstance(query_text, str):
+                self._send_json(400, {"error": "'query_text' must be a string"})
+                return
+
+            if not isinstance(top_k, int) or top_k <= 0:
+                self._send_json(400, {"error": "'top_k' must be a positive integer"})
+                return
+
+            try:
+                payload = rag_retrieve(
+                    query_text=query_text,
+                    top_k=top_k,
+                    filters=filters,
+                )
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
+
+            self._send_json(200, payload)
+            return
+
         if parsed.path == "/snapshot":
             vector_store.create_snapshot()
             self._send_json(200, {"message": "snapshot created"})
@@ -864,6 +948,7 @@ def run_server() -> None:
     print("  POST   /documents/upsert_chunked")
     print("  POST   /search")
     print("  POST   /documents/search")
+    print("  POST   /rag/retrieve")
     print("  POST   /snapshot")
     print("  GET    /snapshot")
     server.serve_forever()
