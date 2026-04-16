@@ -5,11 +5,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
-import os
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WAL_PATH = Path(SCRIPT_DIR) / "vector_store.wal"
-SNAPSHOT_PATH = Path(SCRIPT_DIR) / "vector_store.snapshot.json"
+
+WAL_PATH = Path("vector_store.wal")
+SNAPSHOT_PATH = Path("vector_store.snapshot.json")
 
 HOST = "127.0.0.1"
 PORT = 8080
@@ -108,6 +107,11 @@ class VectorStore:
         self.wal_path = wal_path
         self.snapshot_path = snapshot_path
 
+        # Stage 10 ANN-style candidate index:
+        # bucket_id -> set(record_id)
+        self.bucket_index: dict[int, set[str]] = {}
+        self.num_index_buckets = min(4, self.dimension)
+
         self.wal_path.touch(exist_ok=True)
         self.recover()
 
@@ -178,6 +182,35 @@ class VectorStore:
                 return False
 
         return True
+
+    def _get_dominant_buckets(self, vector: list[float]) -> list[int]:
+        """
+        Return indices of the top-N dimensions by absolute value.
+
+        This is a very simple approximate indexing idea:
+        vectors with similar strong dimensions are likely to become candidates
+        for one another.
+        """
+        indexed = list(enumerate(vector))
+        indexed.sort(key=lambda item: abs(item[1]), reverse=True)
+        return [idx for idx, _ in indexed[: self.num_index_buckets]]
+
+    def _index_record(self, record_id: str, vector: list[float]) -> None:
+        buckets = self._get_dominant_buckets(vector)
+
+        for bucket in buckets:
+            if bucket not in self.bucket_index:
+                self.bucket_index[bucket] = set()
+            self.bucket_index[bucket].add(record_id)
+
+    def _remove_from_index(self, record_id: str, vector: list[float]) -> None:
+        buckets = self._get_dominant_buckets(vector)
+
+        for bucket in buckets:
+            if bucket in self.bucket_index:
+                self.bucket_index[bucket].discard(record_id)
+                if not self.bucket_index[bucket]:
+                    del self.bucket_index[bucket]
 
     def _append_to_wal(self, record: dict[str, Any]) -> None:
         with self.wal_path.open("a", encoding="utf-8") as f:
@@ -271,14 +304,24 @@ class VectorStore:
 
                     self._validate_record(record_id, vector, text, metadata)
 
+                    normalized_vector = self._normalize_vector(vector)
+                    old_record = self.records.get(record_id)
+
+                    if old_record is not None:
+                        self._remove_from_index(record_id, old_record["vector"])
+
                     self.records[record_id] = {
                         "id": record_id,
-                        "vector": self._normalize_vector(vector),
+                        "vector": normalized_vector,
                         "text": text,
                         "metadata": dict(metadata),
                     }
+                    self._index_record(record_id, normalized_vector)
 
                 elif op == "DELETE":
+                    old_record = self.records.get(record_id)
+                    if old_record is not None:
+                        self._remove_from_index(record_id, old_record["vector"])
                     self.records.pop(record_id, None)
 
                 else:
@@ -290,13 +333,17 @@ class VectorStore:
         snapshot_records, last_wal_line = self._load_snapshot()
 
         self.records = {}
+        self.bucket_index = {}
+
         for record_id, record in snapshot_records.items():
+            normalized_vector = self._normalize_vector(record["vector"])
             self.records[record_id] = {
                 "id": record["id"],
-                "vector": self._normalize_vector(record["vector"]),
+                "vector": normalized_vector,
                 "text": record["text"],
                 "metadata": dict(record["metadata"]),
             }
+            self._index_record(record_id, normalized_vector)
 
         self._replay_wal_from_line(last_wal_line)
 
@@ -351,12 +398,17 @@ class VectorStore:
         }
         self._append_to_wal(wal_record)
 
+        old_record = self.records.get(record_id)
+        if old_record is not None:
+            self._remove_from_index(record_id, old_record["vector"])
+
         self.records[record_id] = {
             "id": record_id,
             "vector": normalized_vector,
             "text": text,
             "metadata": dict(metadata),
         }
+        self._index_record(record_id, normalized_vector)
 
     def get(self, record_id: str) -> dict[str, Any] | None:
         record = self.records.get(record_id)
@@ -380,6 +432,8 @@ class VectorStore:
         }
         self._append_to_wal(wal_record)
 
+        old_record = self.records[record_id]
+        self._remove_from_index(record_id, old_record["vector"])
         del self.records[record_id]
         return True
 
@@ -394,6 +448,15 @@ class VectorStore:
             for record_id, record in self.records.items()
         }
 
+    def describe_index(self) -> dict[str, list[str]]:
+        """
+        Helpful for debugging the approximate candidate index.
+        """
+        return {
+            str(bucket): sorted(record_ids)
+            for bucket, record_ids in self.bucket_index.items()
+        }
+
     def search(
         self,
         query_vector: list[float],
@@ -406,9 +469,24 @@ class VectorStore:
             raise ValueError("top_k must be a positive integer")
 
         normalized_query = self._normalize_vector(query_vector)
+
+        # Stage 10 approximate candidate generation:
+        query_buckets = self._get_dominant_buckets(normalized_query)
+
+        candidate_ids = set()
+        for bucket in query_buckets:
+            if bucket in self.bucket_index:
+                candidate_ids.update(self.bucket_index[bucket])
+
+        # Fallback if the approximate index gives no candidates.
+        if not candidate_ids:
+            candidate_ids = set(self.records.keys())
+
         scored_results = []
 
-        for record in self.records.values():
+        for record_id in candidate_ids:
+            record = self.records[record_id]
+
             if not self._metadata_matches(record["metadata"], filters):
                 continue
 
@@ -477,6 +555,10 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"records": vector_store.show_all()})
             return
 
+        if parsed.path == "/index":
+            self._send_json(200, {"bucket_index": vector_store.describe_index()})
+            return
+
         if parsed.path == "/snapshot":
             snapshot = vector_store.load_snapshot_contents()
             if snapshot is None:
@@ -512,7 +594,10 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
             metadata = body.get("metadata", {})
 
             if record_id is None or vector is None:
-                self._send_json(400, {"error": "Missing required fields: 'id' and 'vector'"})
+                self._send_json(
+                    400,
+                    {"error": "Missing required fields: 'id' and 'vector'"},
+                )
                 return
 
             try:
@@ -526,11 +611,14 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": str(e)})
                 return
 
-            self._send_json(200, {
-                "message": "record upserted",
-                "id": record_id,
-                "mode": "vector_upsert",
-            })
+            self._send_json(
+                200,
+                {
+                    "message": "record upserted",
+                    "id": record_id,
+                    "mode": "vector_upsert",
+                },
+            )
             return
 
         if parsed.path == "/documents/upsert":
@@ -545,7 +633,10 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
             metadata = body.get("metadata", {})
 
             if record_id is None or text is None:
-                self._send_json(400, {"error": "Missing required fields: 'id' and 'text'"})
+                self._send_json(
+                    400,
+                    {"error": "Missing required fields: 'id' and 'text'"},
+                )
                 return
 
             if not isinstance(text, str):
@@ -564,12 +655,15 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": str(e)})
                 return
 
-            self._send_json(200, {
-                "message": "document embedded and upserted",
-                "id": record_id,
-                "vector_dimension": len(vector),
-                "mode": "document_upsert",
-            })
+            self._send_json(
+                200,
+                {
+                    "message": "document embedded and upserted",
+                    "id": record_id,
+                    "vector_dimension": len(vector),
+                    "mode": "document_upsert",
+                },
+            )
             return
 
         if parsed.path == "/documents/upsert_chunked":
@@ -586,7 +680,10 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
             chunk_overlap = body.get("chunk_overlap", 3)
 
             if document_id is None or text is None:
-                self._send_json(400, {"error": "Missing required fields: 'id' and 'text'"})
+                self._send_json(
+                    400,
+                    {"error": "Missing required fields: 'id' and 'text'"},
+                )
                 return
 
             if not isinstance(text, str):
@@ -626,15 +723,18 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": str(e)})
                 return
 
-            self._send_json(200, {
-                "message": "document chunked, embedded, and upserted",
-                "document_id": document_id,
-                "chunk_count": len(chunks),
-                "chunk_ids": created_ids,
-                "chunk_size": chunk_size,
-                "chunk_overlap": chunk_overlap,
-                "mode": "document_chunked_upsert",
-            })
+            self._send_json(
+                200,
+                {
+                    "message": "document chunked, embedded, and upserted",
+                    "document_id": document_id,
+                    "chunk_count": len(chunks),
+                    "chunk_ids": created_ids,
+                    "chunk_size": chunk_size,
+                    "chunk_overlap": chunk_overlap,
+                    "mode": "document_chunked_upsert",
+                },
+            )
             return
 
         if parsed.path == "/search":
@@ -649,7 +749,10 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
             filters = body.get("filters")
 
             if query_vector is None:
-                self._send_json(400, {"error": "Missing required field: 'query_vector'"})
+                self._send_json(
+                    400,
+                    {"error": "Missing required field: 'query_vector'"},
+                )
                 return
 
             try:
@@ -662,12 +765,15 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": str(e)})
                 return
 
-            self._send_json(200, {
-                "results": results,
-                "top_k": top_k,
-                "filters": filters,
-                "mode": "vector_search",
-            })
+            self._send_json(
+                200,
+                {
+                    "results": results,
+                    "top_k": top_k,
+                    "filters": filters,
+                    "mode": "vector_search",
+                },
+            )
             return
 
         if parsed.path == "/documents/search":
@@ -682,7 +788,10 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
             filters = body.get("filters")
 
             if query_text is None:
-                self._send_json(400, {"error": "Missing required field: 'query_text'"})
+                self._send_json(
+                    400,
+                    {"error": "Missing required field: 'query_text'"},
+                )
                 return
 
             if not isinstance(query_text, str):
@@ -700,13 +809,16 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": str(e)})
                 return
 
-            self._send_json(200, {
-                "query_text": query_text,
-                "results": results,
-                "top_k": top_k,
-                "filters": filters,
-                "mode": "document_search",
-            })
+            self._send_json(
+                200,
+                {
+                    "query_text": query_text,
+                    "results": results,
+                    "top_k": top_k,
+                    "filters": filters,
+                    "mode": "document_search",
+                },
+            )
             return
 
         if parsed.path == "/snapshot":
@@ -724,10 +836,13 @@ class VectorStoreRequestHandler(BaseHTTPRequestHandler):
 
         deleted = vector_store.delete(record_id)
         if deleted:
-            self._send_json(200, {
-                "message": "record deleted",
-                "id": record_id,
-            })
+            self._send_json(
+                200,
+                {
+                    "message": "record deleted",
+                    "id": record_id,
+                },
+            )
         else:
             self._send_json(404, {"error": f"Record '{record_id}' not found"})
 
@@ -742,6 +857,7 @@ def run_server() -> None:
     print("Routes:")
     print("  GET    /vectors")
     print("  GET    /vectors/<id>")
+    print("  GET    /index")
     print("  DELETE /vectors/<id>")
     print("  POST   /vectors/upsert")
     print("  POST   /documents/upsert")
