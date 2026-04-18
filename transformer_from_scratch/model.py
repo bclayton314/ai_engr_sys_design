@@ -123,3 +123,31 @@ class MultiHeadAttention(nn.Module):
         out = self.proj(out)
 
         return out
+
+
+class FeedForward(nn.Module):
+    """
+    Position-wise feedforward network.
+
+    Applies independently to each token.
+
+    Input:
+        x: (B, T, C)
+
+    Output:
+        out: (B, T, C)
+    """
+
+    def __init__(self, embed_dim: int):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            nn.Linear(embed_dim, 4 * embed_dim),  # expand
+            nn.GELU(),                            # non-linearity
+            nn.Linear(4 * embed_dim, embed_dim)   # project back
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
