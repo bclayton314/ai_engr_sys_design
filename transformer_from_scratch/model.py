@@ -72,3 +72,54 @@ class SelfAttentionHead(nn.Module):
         out = wei @ v                  # (B, T, head_size)
 
         return out
+
+
+class MultiHeadAttention(nn.Module):
+    """
+    Multi-head attention:
+    - runs multiple attention heads in parallel
+    - concatenates their outputs
+    - projects back to embedding dimension
+
+    Input:
+        x: (B, T, C)
+
+    Output:
+        out: (B, T, C)
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int, block_size: int):
+        super().__init__()
+
+        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_size = embed_dim // num_heads
+
+        # Create multiple attention heads
+        self.heads = nn.ModuleList([
+            SelfAttentionHead(embed_dim, self.head_size, block_size)
+            for _ in range(num_heads)
+        ])
+
+        # Final projection layer
+        self.proj = nn.Linear(embed_dim, embed_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x shape: (B, T, C)
+        """
+
+        # Run each head independently
+        head_outputs = [h(x) for h in self.heads]
+        # Each: (B, T, head_size)
+
+        # Concatenate along feature dimension
+        out = torch.cat(head_outputs, dim=-1)
+        # Now: (B, T, C)
+
+        # Final projection
+        out = self.proj(out)
+
+        return out
