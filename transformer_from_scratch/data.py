@@ -1,96 +1,95 @@
+from __future__ import annotations
+
 import torch
 
 
 class CharTokenizer:
     """
-    A very simple character-level tokenizer.
+    Simple character-level tokenizer.
 
-    Responsibilities:
-    - Build a vocabulary from raw text
-    - Encode text into integer token IDs
-    - Decode token IDs back into text
+    Builds a vocabulary from the training text and provides:
+    - encode(text) -> list[int]
+    - decode(ids)  -> str
     """
 
     def __init__(self, text: str):
-        # Get a sorted list of unique characters in the dataset
-        chars = sorted(list(set(text)))
+        if not text:
+            raise ValueError("Tokenizer cannot be built from empty text.")
 
+        chars = sorted(set(text))
         self.chars = chars
         self.vocab_size = len(chars)
 
-        # Character -> integer ID
         self.stoi = {ch: i for i, ch in enumerate(chars)}
-
-        # Integer ID -> character
         self.itos = {i: ch for i, ch in enumerate(chars)}
 
     def encode(self, s: str) -> list[int]:
-        """
-        Convert a string into a list of integer token IDs.
-        """
-        return [self.stoi[ch] for ch in s]
+        try:
+            return [self.stoi[ch] for ch in s]
+        except KeyError as e:
+            raise ValueError(f"Character {repr(e.args[0])} not in tokenizer vocabulary.") from e
 
     def decode(self, ids: list[int]) -> str:
-        """
-        Convert a list of integer token IDs back into a string.
-        """
-        return "".join(self.itos[i] for i in ids)
+        try:
+            return "".join(self.itos[i] for i in ids)
+        except KeyError as e:
+            raise ValueError(f"Token id {e.args[0]} not in tokenizer vocabulary.") from e
 
 
 class TextDataset:
     """
-    A lightweight dataset wrapper for next-token prediction.
+    Character-level next-token dataset.
 
-    Example:
-        text = "hello"
-        encoded = [h, e, l, l, o]
+    Given a sequence:
+        x = [t0, t1, t2, ..., t_{n-1}]
+        y = [t1, t2, t3, ..., t_n]
 
-    If block_size = 4:
-        input_ids  = [h, e, l, l]
-        target_ids = [e, l, l, o]
-
-    So the model learns to predict the next character at each position.
+    So the model learns: predict the next token at every position.
     """
 
-    def __init__(self, text: str, block_size: int = 8, train_split: float = 0.9):
+    def __init__(self, text: str, block_size: int = 64, train_split: float = 0.9):
+        if not text:
+            raise ValueError("TextDataset requires non-empty text.")
+        if not (0.0 < train_split < 1.0):
+            raise ValueError("train_split must be between 0 and 1.")
+        if block_size < 1:
+            raise ValueError("block_size must be >= 1.")
+
         self.text = text
         self.block_size = block_size
-
-        # Build tokenizer from the full corpus
         self.tokenizer = CharTokenizer(text)
 
-        # Encode the entire text corpus into token IDs
         encoded = self.tokenizer.encode(text)
         self.data = torch.tensor(encoded, dtype=torch.long)
 
-        # Split into train and validation sets
         split_idx = int(len(self.data) * train_split)
         self.train_data = self.data[:split_idx]
         self.val_data = self.data[split_idx:]
 
-    def get_batch(self, split: str = "train", batch_size: int = 4):
-        """
-        Sample a random batch of subsequences.
-
-        Returns:
-            x: shape (batch_size, block_size)
-            y: shape (batch_size, block_size)
-
-        y is x shifted one token to the left, so each position is the "next token" target.
-        """
-        data = self.train_data if split == "train" else self.val_data
-
-        if len(data) <= self.block_size:
+        if len(self.train_data) <= block_size + 1:
             raise ValueError(
-                f"Dataset split is too small for block_size={self.block_size}. "
-                f"Need more text or a smaller block_size."
+                "Training split is too small for the given block_size. "
+                "Use more text or reduce block_size."
+            )
+        if len(self.val_data) <= block_size + 1:
+            raise ValueError(
+                "Validation split is too small for the given block_size. "
+                "Use more text or reduce block_size."
             )
 
-        # Random starting indices for each training example
-        ix = torch.randint(len(data) - self.block_size, (batch_size,))
+    def get_batch(self, split: str = "train", batch_size: int = 32) -> tuple[torch.Tensor, torch.Tensor]:
+        if batch_size < 1:
+            raise ValueError("batch_size must be >= 1.")
 
-        # Build input and target sequences
-        x = torch.stack([data[i:i + self.block_size] for i in ix])
-        y = torch.stack([data[i + 1:i + self.block_size + 1] for i in ix])
+        data = self.train_data if split == "train" else self.val_data
 
+        max_start = len(data) - self.block_size - 1
+        if max_start <= 0:
+            raise ValueError(
+                f"Dataset split '{split}' is too small for block_size={self.block_size}."
+            )
+
+        ix = torch.randint(0, max_start + 1, (batch_size,))
+        x = torch.stack([data[i : i + self.block_size] for i in ix])
+        y = torch.stack([data[i + 1 : i + self.block_size + 1] for i in ix])
         return x, y

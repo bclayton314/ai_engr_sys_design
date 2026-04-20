@@ -1,183 +1,126 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 import torch
 
 from data import TextDataset
-from model import MiniGPT
+from model import GPTConfig, MiniGPT
+from utils import (
+    estimate_loss,
+    get_device,
+    loss_to_perplexity,
+    save_checkpoint,
+    generate_from_prompt,
+)
 
 
 # ----------------------------
-# Hyperparameters
+# Training hyperparameters
 # ----------------------------
-batch_size = 32
-block_size = 64
-max_iters = 2000
-eval_interval = 200
-eval_iters = 100
-learning_rate = 3e-4
+BATCH_SIZE = 32
+MAX_ITERS = 2000
+EVAL_INTERVAL = 200
+EVAL_ITERS = 100
+LEARNING_RATE = 3e-4
+TRAIN_SPLIT = 0.9
 
-embed_dim = 128
-num_heads = 4
-num_layers = 4
-dropout = 0.1
+# ----------------------------
+# Model hyperparameters
+# ----------------------------
+BLOCK_SIZE = 64
+EMBED_DIM = 128
+NUM_HEADS = 4
+NUM_LAYERS = 4
+DROPOUT = 0.1
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-torch.manual_seed(42)
-
-checkpoint_dir = Path("checkpoints")
-checkpoint_path = checkpoint_dir / "mini_gpt.pt"
-
-
-def estimate_loss(model: MiniGPT, dataset: TextDataset) -> dict[str, float]:
-    """
-    Estimate mean loss over several batches for train and validation splits.
-    """
-    out = {}
-    model.eval()
-
-    for split in ["train", "val"]:
-        losses = torch.zeros(eval_iters)
-
-        for k in range(eval_iters):
-            x, y = dataset.get_batch(split=split, batch_size=batch_size)
-            x = x.to(device)
-            y = y.to(device)
-
-            _, loss = model(x, y)
-            losses[k] = loss.item()
-
-        out[split] = losses.mean().item()
-
-    model.train()
-    return out
+# ----------------------------
+# Paths
+# ----------------------------
+DATA_PATH = Path("data/input.txt")
+CHECKPOINT_PATH = Path("checkpoints/mini_gpt.pt")
 
 
-def save_checkpoint(
-    model: MiniGPT,
-    optimizer: torch.optim.Optimizer,
-    step: int,
-    tokenizer_chars: list[str],
-) -> None:
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+def main() -> None:
+    device = get_device()
+    torch.manual_seed(42)
 
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "step": step,
-            "tokenizer_chars": tokenizer_chars,
-            "config": {
-                "block_size": block_size,
-                "embed_dim": embed_dim,
-                "num_heads": num_heads,
-                "num_layers": num_layers,
-                "dropout": dropout,
-            },
-        },
-        checkpoint_path,
+    if not DATA_PATH.exists():
+        raise FileNotFoundError(f"Missing training data file: {DATA_PATH}")
+
+    text = DATA_PATH.read_text(encoding="utf-8")
+    dataset = TextDataset(text=text, block_size=BLOCK_SIZE, train_split=TRAIN_SPLIT)
+    tokenizer = dataset.tokenizer
+
+    config = GPTConfig(
+        vocab_size=tokenizer.vocab_size,
+        block_size=BLOCK_SIZE,
+        embed_dim=EMBED_DIM,
+        num_heads=NUM_HEADS,
+        num_layers=NUM_LAYERS,
+        dropout=DROPOUT,
     )
 
+    model = MiniGPT(config).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 
-def load_checkpoint(vocab_size: int) -> MiniGPT:
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-
-    config = checkpoint["config"]
-    model = MiniGPT(
-        vocab_size=vocab_size,
-        embed_dim=config["embed_dim"],
-        block_size=config["block_size"],
-        num_heads=config["num_heads"],
-        num_layers=config["num_layers"],
-        dropout=config["dropout"],
-    ).to(device)
-
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
-    return model
-
-
-def generate_from_prompt(
-    model: MiniGPT,
-    dataset: TextDataset,
-    prompt: str,
-    max_new_tokens: int = 300,
-    temperature: float = 0.8,
-    top_k: int | None = 20,
-) -> str:
-    tokenizer = dataset.tokenizer
-
-    for ch in prompt:
-        if ch not in tokenizer.stoi:
-            raise ValueError(
-                f"Prompt contains unseen character {repr(ch)}. "
-                "Use only characters from the training corpus for this character-level model."
-            )
-
-    context_ids = tokenizer.encode(prompt)
-    context = torch.tensor([context_ids], dtype=torch.long, device=device)
-
-    generated_ids = model.generate(
-        context,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_k=top_k,
-    )[0].tolist()
-
-    return tokenizer.decode(generated_ids)
-
-
-def main():
-    # ----------------------------
-    # Load text + dataset
-    # ----------------------------
-    data_path = Path("data/input.txt")
-    text = data_path.read_text(encoding="utf-8")
-
-    dataset = TextDataset(text=text, block_size=block_size, train_split=0.9)
-    tokenizer = dataset.tokenizer
-
-    print("=" * 70)
-    print("STAGE 10: DROPOUT + BETTER GENERATION + CHECKPOINTS")
-    print("=" * 70)
-    print(f"Device: {device}")
-    print(f"Corpus length: {len(text)}")
-    print(f"Vocabulary size: {tokenizer.vocab_size}")
-    print(f"Batch size: {batch_size}")
-    print(f"Block size: {block_size}")
-    print(f"Embedding dim: {embed_dim}")
-    print(f"Num heads: {num_heads}")
-    print(f"Num layers: {num_layers}")
-    print(f"Dropout: {dropout}")
+    print("=" * 72)
+    print("FINAL STAGE: TRAINING + EVALUATION + CHECKPOINTING")
+    print("=" * 72)
+    print(f"Device:           {device}")
+    print(f"Corpus length:    {len(text)}")
+    print(f"Vocabulary size:  {tokenizer.vocab_size}")
+    print(f"Batch size:       {BATCH_SIZE}")
+    print(f"Block size:       {BLOCK_SIZE}")
+    print(f"Embed dim:        {EMBED_DIM}")
+    print(f"Num heads:        {NUM_HEADS}")
+    print(f"Num layers:       {NUM_LAYERS}")
+    print(f"Dropout:          {DROPOUT}")
+    print(f"Max iterations:   {MAX_ITERS}")
     print()
 
-    # ----------------------------
-    # Train model
-    # ----------------------------
-    model = MiniGPT(
-        vocab_size=tokenizer.vocab_size,
-        embed_dim=embed_dim,
-        block_size=block_size,
-        num_heads=num_heads,
-        num_layers=num_layers,
-        dropout=dropout,
-    ).to(device)
+    best_val_loss = float("inf")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    for step in range(MAX_ITERS):
+        if step % EVAL_INTERVAL == 0 or step == MAX_ITERS - 1:
+            losses = estimate_loss(
+                model=model,
+                dataset=dataset,
+                batch_size=BATCH_SIZE,
+                eval_iters=EVAL_ITERS,
+                device=device,
+            )
+            train_loss = losses["train"]
+            val_loss = losses["val"]
 
-    for step in range(max_iters):
-        if step % eval_interval == 0 or step == max_iters - 1:
-            losses = estimate_loss(model, dataset)
+            train_ppl = loss_to_perplexity(train_loss)
+            val_ppl = loss_to_perplexity(val_loss)
+
             print(
                 f"step {step:4d} | "
-                f"train loss {losses['train']:.4f} | "
-                f"val loss {losses['val']:.4f}"
+                f"train loss {train_loss:.4f} | train ppl {train_ppl:.2f} | "
+                f"val loss {val_loss:.4f} | val ppl {val_ppl:.2f}"
             )
 
-        x, y = dataset.get_batch(split="train", batch_size=batch_size)
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                save_checkpoint(
+                    path=CHECKPOINT_PATH,
+                    model=model,
+                    optimizer=optimizer,
+                    step=step,
+                    best_val_loss=best_val_loss,
+                    tokenizer_chars=tokenizer.chars,
+                )
+                print(f"  saved new best checkpoint -> {CHECKPOINT_PATH}")
+
+        x, y = dataset.get_batch(split="train", batch_size=BATCH_SIZE)
         x = x.to(device)
         y = y.to(device)
 
         _, loss = model(x, y)
+        if loss is None:
+            raise RuntimeError("Loss unexpectedly None during training.")
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -185,47 +128,35 @@ def main():
 
     print()
     print("Training complete.")
+    print(f"Best validation loss: {best_val_loss:.4f}")
+    print(f"Best validation perplexity: {loss_to_perplexity(best_val_loss):.2f}")
     print()
 
-    # ----------------------------
-    # Save checkpoint
-    # ----------------------------
-    save_checkpoint(model, optimizer, max_iters, tokenizer.chars)
-    print(f"Saved checkpoint to: {checkpoint_path}")
-    print()
+    print("=" * 72)
+    print("FIXED-PROMPT SAMPLE GENERATIONS")
+    print("=" * 72)
 
-    # ----------------------------
-    # Reload checkpoint
-    # ----------------------------
-    reloaded_model = load_checkpoint(vocab_size=tokenizer.vocab_size)
-
-    # ----------------------------
-    # Generate from prompts
-    # ----------------------------
     prompts = [
         "The ",
         "To be",
         "\n",
     ]
 
-    print("=" * 70)
-    print("GENERATED SAMPLES")
-    print("=" * 70)
-
     for prompt in prompts:
         print(f"\nPrompt: {repr(prompt)}")
         try:
-            generated_text = generate_from_prompt(
-                model=reloaded_model,
+            generated = generate_from_prompt(
+                model=model,
                 dataset=dataset,
                 prompt=prompt,
-                max_new_tokens=250,
+                device=device,
+                max_new_tokens=200,
                 temperature=0.8,
                 top_k=20,
             )
-            print(generated_text)
+            print(generated)
         except ValueError as e:
-            print(f"Skipped prompt: {e}")
+            print(f"Skipped: {e}")
 
 
 if __name__ == "__main__":
