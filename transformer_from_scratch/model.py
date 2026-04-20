@@ -3,110 +3,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-
-class MiniGPT(nn.Module):
-    """
-    Full GPT-style model.
-    """
-
-    def __init__(
-        self,
-        vocab_size: int,
-        embed_dim: int,
-        block_size: int,
-        num_heads: int,
-        num_layers: int
-    ):
-        super().__init__()
-
-        self.block_size = block_size
-
-        # Embedding
-        self.embedding = InputEmbedding(
-            vocab_size=vocab_size,
-            embed_dim=embed_dim,
-            block_size=block_size
-        )
-
-        # Stack of transformer blocks
-        self.blocks = nn.Sequential(*[
-            TransformerBlock(embed_dim, num_heads, block_size)
-            for _ in range(num_layers)
-        ])
-
-        # Final normalization
-        self.ln_f = nn.LayerNorm(embed_dim)
-
-        # Output projection to vocabulary
-        self.lm_head = nn.Linear(embed_dim, vocab_size)
-
-    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None):
-        """
-        idx: (B, T)
-        targets: (B, T)
-
-        returns:
-            logits: (B, T, vocab_size)
-            loss: scalar (if targets provided)
-        """
-
-        B, T = idx.shape
-
-        # Embedding
-        x = self.embedding(idx)            # (B, T, C)
-
-        # Transformer blocks
-        x = self.blocks(x)                # (B, T, C)
-
-        # Final norm
-        x = self.ln_f(x)                  # (B, T, C)
-
-        # Logits
-        logits = self.lm_head(x)          # (B, T, vocab_size)
-
-        loss = None
-        if targets is not None:
-            # reshape for cross-entropy
-            B, T, C = logits.shape
-            logits = logits.view(B * T, C)
-            targets = targets.view(B * T)
-
-            loss = F.cross_entropy(logits, targets)
-
-        return logits, loss
-
-
 class InputEmbedding(nn.Module):
     def __init__(self, vocab_size: int, embed_dim: int, block_size: int):
         super().__init__()
-
         self.token_embedding_table = nn.Embedding(vocab_size, embed_dim)
         self.position_embedding_table = nn.Embedding(block_size, embed_dim)
-
         self.block_size = block_size
 
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
         B, T = idx.shape
 
-        tok_emb = self.token_embedding_table(idx)      # (B, T, C)
-        pos = torch.arange(T, device=idx.device)
-        pos_emb = self.position_embedding_table(pos)   # (T, C)
+        if T > self.block_size:
+            raise ValueError(f"Sequence length {T} exceeds block_size={self.block_size}")
 
-        return tok_emb + pos_emb                       # (B, T, C)
+        tok_emb = self.token_embedding_table(idx)  # (B, T, C)
+        pos = torch.arange(T, device=idx.device)
+        pos_emb = self.position_embedding_table(pos)  # (T, C)
+
+        return tok_emb + pos_emb  # (B, T, C)
 
 
 class SelfAttentionHead(nn.Module):
     """
-    Single-head self-attention.
-
-    Input:
-        x: (B, T, C)
-
-    Output:
-        out: (B, T, head_size)
+    Single causal self-attention head.
     """
 
-    def __init__(self, embed_dim: int, head_size: int, block_size: int):
+    def __init__(self, embed_dim: int, head_size: int, block_size: int, dropout: float):
         super().__init__()
 
         self.key = nn.Linear(embed_dim, head_size, bias=False)
@@ -114,110 +36,66 @@ class SelfAttentionHead(nn.Module):
         self.value = nn.Linear(embed_dim, head_size, bias=False)
 
         self.head_size = head_size
+        self.attn_dropout = nn.Dropout(dropout)
 
-        # Causal mask (lower triangular matrix)
-        self.register_buffer(
-            "tril",
-            torch.tril(torch.ones(block_size, block_size))
-        )
+        self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape
 
-        # Compute Q, K, V
-        k = self.key(x)     # (B, T, head_size)
-        q = self.query(x)   # (B, T, head_size)
-        v = self.value(x)   # (B, T, head_size)
+        k = self.key(x)    # (B, T, H)
+        q = self.query(x)  # (B, T, H)
+        v = self.value(x)  # (B, T, H)
 
-        # Compute attention scores
-        wei = q @ k.transpose(-2, -1)   # (B, T, T)
-
-        # Scale
+        wei = q @ k.transpose(-2, -1)                    # (B, T, T)
         wei = wei * (self.head_size ** -0.5)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+        wei = F.softmax(wei, dim=-1)
+        wei = self.attn_dropout(wei)
 
-        # Apply causal mask
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
-
-        # Softmax
-        wei = F.softmax(wei, dim=-1)   # (B, T, T)
-
-        # Weighted sum of values
-        out = wei @ v                  # (B, T, head_size)
-
+        out = wei @ v                                    # (B, T, H)
         return out
 
 
 class MultiHeadAttention(nn.Module):
     """
-    Multi-head attention:
-    - runs multiple attention heads in parallel
-    - concatenates their outputs
-    - projects back to embedding dimension
-
-    Input:
-        x: (B, T, C)
-
-    Output:
-        out: (B, T, C)
+    Multi-head causal self-attention.
     """
 
-    def __init__(self, embed_dim: int, num_heads: int, block_size: int):
+    def __init__(self, embed_dim: int, num_heads: int, block_size: int, dropout: float):
         super().__init__()
 
-        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+        if embed_dim % num_heads != 0:
+            raise ValueError("embed_dim must be divisible by num_heads")
 
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_size = embed_dim // num_heads
+        head_size = embed_dim // num_heads
 
-        # Create multiple attention heads
         self.heads = nn.ModuleList([
-            SelfAttentionHead(embed_dim, self.head_size, block_size)
+            SelfAttentionHead(embed_dim, head_size, block_size, dropout)
             for _ in range(num_heads)
         ])
-
-        # Final projection layer
         self.proj = nn.Linear(embed_dim, embed_dim)
+        self.proj_dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x shape: (B, T, C)
-        """
-
-        # Run each head independently
-        head_outputs = [h(x) for h in self.heads]
-        # Each: (B, T, head_size)
-
-        # Concatenate along feature dimension
-        out = torch.cat(head_outputs, dim=-1)
-        # Now: (B, T, C)
-
-        # Final projection
+        out = torch.cat([head(x) for head in self.heads], dim=-1)  # (B, T, C)
         out = self.proj(out)
-
+        out = self.proj_dropout(out)
         return out
 
 
 class FeedForward(nn.Module):
     """
     Position-wise feedforward network.
-
-    Applies independently to each token.
-
-    Input:
-        x: (B, T, C)
-
-    Output:
-        out: (B, T, C)
     """
 
-    def __init__(self, embed_dim: int):
+    def __init__(self, embed_dim: int, dropout: float):
         super().__init__()
-
         self.net = nn.Sequential(
-            nn.Linear(embed_dim, 4 * embed_dim),  # expand
-            nn.GELU(),                            # non-linearity
-            nn.Linear(4 * embed_dim, embed_dim)   # project back
+            nn.Linear(embed_dim, 4 * embed_dim),
+            nn.GELU(),
+            nn.Linear(4 * embed_dim, embed_dim),
+            nn.Dropout(dropout),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -226,27 +104,103 @@ class FeedForward(nn.Module):
 
 class TransformerBlock(nn.Module):
     """
-    Full transformer block (pre-norm).
-
-    Structure:
-        x → x + Attention(LN(x))
-          → x + FFN(LN(x))
+    Pre-norm transformer block:
+        x = x + attention(layernorm(x))
+        x = x + ffn(layernorm(x))
     """
 
-    def __init__(self, embed_dim: int, num_heads: int, block_size: int):
+    def __init__(self, embed_dim: int, num_heads: int, block_size: int, dropout: float):
         super().__init__()
-
         self.ln1 = nn.LayerNorm(embed_dim)
         self.ln2 = nn.LayerNorm(embed_dim)
 
-        self.attn = MultiHeadAttention(embed_dim, num_heads, block_size)
-        self.ffn = FeedForward(embed_dim)
+        self.attn = MultiHeadAttention(embed_dim, num_heads, block_size, dropout)
+        self.ffn = FeedForward(embed_dim, dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Attention with residual
         x = x + self.attn(self.ln1(x))
-
-        # Feedforward with residual
         x = x + self.ffn(self.ln2(x))
-
         return x
+
+
+class MiniGPT(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        embed_dim: int,
+        block_size: int,
+        num_heads: int,
+        num_layers: int,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+
+        self.block_size = block_size
+
+        self.embedding = InputEmbedding(
+            vocab_size=vocab_size,
+            embed_dim=embed_dim,
+            block_size=block_size,
+        )
+
+        self.blocks = nn.Sequential(*[
+            TransformerBlock(embed_dim, num_heads, block_size, dropout)
+            for _ in range(num_layers)
+        ])
+
+        self.ln_f = nn.LayerNorm(embed_dim)
+        self.lm_head = nn.Linear(embed_dim, vocab_size)
+
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
+        x = self.embedding(idx)      # (B, T, C)
+        x = self.blocks(x)           # (B, T, C)
+        x = self.ln_f(x)             # (B, T, C)
+        logits = self.lm_head(x)     # (B, T, vocab_size)
+
+        loss = None
+        if targets is not None:
+            B, T, C = logits.shape
+            logits_flat = logits.view(B * T, C)
+            targets_flat = targets.view(B * T)
+            loss = F.cross_entropy(logits_flat, targets_flat)
+
+        return logits, loss
+
+    @torch.no_grad()
+    def generate(
+        self,
+        idx: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+    ) -> torch.Tensor:
+        """
+        Autoregressive generation with optional temperature and top-k sampling.
+
+        Args:
+            idx: (B, T)
+            max_new_tokens: number of tokens to generate
+            temperature: controls randomness; lower = sharper
+            top_k: if set, only sample from the k most likely next tokens
+        """
+        if temperature <= 0:
+            raise ValueError("temperature must be > 0")
+
+        for _ in range(max_new_tokens):
+            idx_cond = idx[:, -self.block_size:]
+            logits, _ = self(idx_cond)
+
+            logits = logits[:, -1, :]  # (B, vocab_size)
+            logits = logits / temperature
+
+            if top_k is not None:
+                k = min(top_k, logits.size(-1))
+                top_vals, _ = torch.topk(logits, k)
+                cutoff = top_vals[:, [-1]]
+                logits = logits.masked_fill(logits < cutoff, float("-inf"))
+
+            probs = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
+            idx = torch.cat((idx, next_token), dim=1)
+
+        return idx
