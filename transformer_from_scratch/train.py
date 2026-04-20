@@ -37,7 +37,7 @@ DROPOUT = 0.1
 # ----------------------------
 # Paths
 # ----------------------------
-DATA_PATH = Path("data/input.txt")
+DATA_PATH = Path(__file__).parent / "data" / "input.txt"
 CHECKPOINT_PATH = Path("checkpoints/mini_gpt.pt")
 
 
