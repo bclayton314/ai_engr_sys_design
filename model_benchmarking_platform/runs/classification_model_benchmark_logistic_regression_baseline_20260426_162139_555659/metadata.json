@@ -1,0 +1,10 @@
+{
+  "run_id": "classification_model_benchmark_logistic_regression_baseline_20260426_162139_555659",
+  "experiment_name": "classification_model_benchmark",
+  "model_name": "logistic_regression_baseline",
+  "model_type": "logistic_regression",
+  "timestamp_utc": "2026-04-26T16:21:39.576564+00:00",
+  "train_size": 800,
+  "test_size": 200,
+  "model_artifact_path": "artifacts\\classification_model_benchmark_logistic_regression_baseline_20260426_162139_555659\\model.joblib"
+}

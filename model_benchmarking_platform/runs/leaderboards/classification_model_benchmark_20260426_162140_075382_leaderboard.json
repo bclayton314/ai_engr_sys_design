@@ -1,0 +1,41 @@
+[
+  {
+    "run_id": "classification_model_benchmark_random_forest_baseline_20260426_162139_611410",
+    "model_name": "random_forest_baseline",
+    "model_type": "random_forest",
+    "model_path": "artifacts\\classification_model_benchmark_random_forest_baseline_20260426_162139_611410\\model.joblib",
+    "run_dir": "runs\\classification_model_benchmark_random_forest_baseline_20260426_162139_611410",
+    "accuracy": 0.885,
+    "precision": 0.9148936170212766,
+    "recall": 0.8514851485148515,
+    "f1": 0.882051282051282,
+    "roc_auc": 0.9538953895389538,
+    "rank": 1
+  },
+  {
+    "run_id": "classification_model_benchmark_logistic_regression_baseline_20260426_162139_555659",
+    "model_name": "logistic_regression_baseline",
+    "model_type": "logistic_regression",
+    "model_path": "artifacts\\classification_model_benchmark_logistic_regression_baseline_20260426_162139_555659\\model.joblib",
+    "run_dir": "runs\\classification_model_benchmark_logistic_regression_baseline_20260426_162139_555659",
+    "accuracy": 0.855,
+    "precision": 0.8529411764705882,
+    "recall": 0.8613861386138614,
+    "f1": 0.8571428571428571,
+    "roc_auc": 0.9103910391039105,
+    "rank": 2
+  },
+  {
+    "run_id": "classification_model_benchmark_decision_tree_baseline_20260426_162139_578566",
+    "model_name": "decision_tree_baseline",
+    "model_type": "decision_tree",
+    "model_path": "artifacts\\classification_model_benchmark_decision_tree_baseline_20260426_162139_578566\\model.joblib",
+    "run_dir": "runs\\classification_model_benchmark_decision_tree_baseline_20260426_162139_578566",
+    "accuracy": 0.8,
+    "precision": 0.7961165048543689,
+    "recall": 0.8118811881188119,
+    "f1": 0.803921568627451,
+    "roc_auc": 0.8631363136313632,
+    "rank": 3
+  }
+]

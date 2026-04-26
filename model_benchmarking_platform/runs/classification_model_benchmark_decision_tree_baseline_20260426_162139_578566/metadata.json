@@ -1,0 +1,10 @@
+{
+  "run_id": "classification_model_benchmark_decision_tree_baseline_20260426_162139_578566",
+  "experiment_name": "classification_model_benchmark",
+  "model_name": "decision_tree_baseline",
+  "model_type": "decision_tree",
+  "timestamp_utc": "2026-04-26T16:21:39.609518+00:00",
+  "train_size": 800,
+  "test_size": 200,
+  "model_artifact_path": "artifacts\\classification_model_benchmark_decision_tree_baseline_20260426_162139_578566\\model.joblib"
+}

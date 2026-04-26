@@ -1,4 +1,4 @@
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -6,7 +6,7 @@ def utc_timestamp() -> str:
     """
     Return a compact UTC timestamp for run IDs.
     """
-    return datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
 
 
 def ensure_dir(path: str | Path) -> Path:

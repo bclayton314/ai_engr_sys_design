@@ -5,6 +5,9 @@ from sklearn.model_selection import train_test_split
 def load_dataset(dataset_config: dict, random_seed: int):
     """
     Create a synthetic classification dataset and split it into train/test sets.
+
+    In later stages, this can be replaced with real CSV loading, feature
+    pipelines, or versioned datasets.
     """
     X, y = make_classification(
         n_samples=dataset_config["n_samples"],

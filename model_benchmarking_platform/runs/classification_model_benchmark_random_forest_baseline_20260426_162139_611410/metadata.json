@@ -1,0 +1,10 @@
+{
+  "run_id": "classification_model_benchmark_random_forest_baseline_20260426_162139_611410",
+  "experiment_name": "classification_model_benchmark",
+  "model_name": "random_forest_baseline",
+  "model_type": "random_forest",
+  "timestamp_utc": "2026-04-26T16:21:40.073107+00:00",
+  "train_size": 800,
+  "test_size": 200,
+  "model_artifact_path": "artifacts\\classification_model_benchmark_random_forest_baseline_20260426_162139_611410\\model.joblib"
+}
