@@ -1,0 +1,10 @@
+{
+  "model_name": "random_forest_baseline",
+  "metrics": {
+    "accuracy": 0.895,
+    "precision": 0.90,
+    "recall": 0.89,
+    "f1": 0.895,
+    "roc_auc": 0.952
+  }
+}

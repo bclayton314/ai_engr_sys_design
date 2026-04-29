@@ -1,0 +1,35 @@
+[
+  {
+    "rank": 1,
+    "run_id": "classification_model_benchmark_random_forest_20260429",
+    "model_name": "random_forest_baseline",
+    "model_type": "random_forest",
+    "accuracy": 0.895,
+    "precision": 0.90,
+    "recall": 0.89,
+    "f1": 0.895,
+    "roc_auc": 0.952
+  },
+  {
+    "rank": 2,
+    "run_id": "classification_model_benchmark_logistic_regression_20260429",
+    "model_name": "logistic_regression_baseline",
+    "model_type": "logistic_regression",
+    "accuracy": 0.845,
+    "precision": 0.85,
+    "recall": 0.84,
+    "f1": 0.846,
+    "roc_auc": 0.913
+  },
+  {
+    "rank": 3,
+    "run_id": "classification_model_benchmark_decision_tree_20260429",
+    "model_name": "decision_tree_baseline",
+    "model_type": "decision_tree",
+    "accuracy": 0.82,
+    "precision": 0.82,
+    "recall": 0.81,
+    "f1": 0.818,
+    "roc_auc": 0.841
+  }
+]
