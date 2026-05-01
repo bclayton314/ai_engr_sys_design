@@ -23,6 +23,14 @@ class RunTracker:
         path = self.run_dir / "metrics.json"
         self._save_json(path, metrics)
 
+    def save_evaluation_report(self, report: dict) -> None:
+        path = self.run_dir / "evaluation_report.json"
+        self._save_json(path, report)
+
+    def save_cross_validation_report(self, report: dict) -> None:
+        path = self.run_dir / "cross_validation_report.json"
+        self._save_json(path, report)
+
     def save_metadata(self, metadata: dict) -> None:
         path = self.run_dir / "metadata.json"
         self._save_json(path, metadata)

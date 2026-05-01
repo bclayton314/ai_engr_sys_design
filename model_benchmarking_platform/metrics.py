@@ -18,3 +18,14 @@ def compute_classification_metrics(y_true, y_pred, y_prob) -> dict:
         "f1": float(f1_score(y_true, y_pred, zero_division=0)),
         "roc_auc": float(roc_auc_score(y_true, y_prob)),
     }
+
+
+def compute_evaluation_report(y_true, y_pred, y_prob) -> dict:
+    """
+    Compute standard binary classification metrics and return evaluation report.
+    """
+    summary_metrics = compute_classification_metrics(y_true, y_pred, y_prob)
+    
+    return {
+        "summary_metrics": summary_metrics,
+    }

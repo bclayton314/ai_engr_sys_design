@@ -2,12 +2,12 @@ from sklearn.datasets import make_classification
 from sklearn.model_selection import train_test_split
 
 
-def load_dataset(dataset_config: dict, random_seed: int):
+def create_dataset(dataset_config: dict, random_seed: int):
     """
-    Create a synthetic classification dataset and split it into train/test sets.
+    Create a synthetic classification dataset.
 
-    In later stages, this can be replaced with real CSV loading, feature
-    pipelines, or versioned datasets.
+    This returns the full dataset before any splitting so it can be used for
+    both holdout evaluation and cross-validation.
     """
     X, y = make_classification(
         n_samples=dataset_config["n_samples"],
@@ -18,7 +18,14 @@ def load_dataset(dataset_config: dict, random_seed: int):
         random_state=random_seed,
     )
 
-    X_train, X_test, y_train, y_test = train_test_split(
+    return X, y
+
+
+def split_dataset(X, y, dataset_config: dict, random_seed: int):
+    """
+    Split a dataset into train/test sets.
+    """
+    return train_test_split(
         X,
         y,
         test_size=dataset_config["test_size"],
@@ -26,4 +33,19 @@ def load_dataset(dataset_config: dict, random_seed: int):
         stratify=y,
     )
 
-    return X_train, X_test, y_train, y_test
+
+def load_dataset(dataset_config: dict, random_seed: int):
+    """
+    Backward-compatible helper that creates and splits a dataset.
+    """
+    X, y = create_dataset(
+        dataset_config=dataset_config,
+        random_seed=random_seed,
+    )
+
+    return split_dataset(
+        X=X,
+        y=y,
+        dataset_config=dataset_config,
+        random_seed=random_seed,
+    )

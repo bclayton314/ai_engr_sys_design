@@ -1,7 +1,7 @@
 {
   "experiment_name": "classification_model_benchmark",
   "random_seed": 42,
-  "ranking_metric": "f1",
+  "ranking_metric": "cv_f1_mean",
   "dataset": {
     "n_samples": 1000,
     "n_features": 20,
@@ -9,6 +9,11 @@
     "n_redundant": 4,
     "n_classes": 2,
     "test_size": 0.2
+  },
+  "cross_validation": {
+    "enabled": true,
+    "n_splits": 5,
+    "shuffle": true
   },
   "models": [
     {
